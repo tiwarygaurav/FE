@@ -1,0 +1,4639 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Urja Meter API",
+    "description": "\nA clean, read-only REST API over the **Urja Meter Ops** portal (smart-meter data for a\nJaipur distribution utility). The portal has no API of its own. This service logs in as a\nnormal user, reads the portal's internal endpoints (see `PROTOCOL.md` in the repository)\nand serves the data as typed JSON.\n\n* **Meters**: nameplate, status, location, network position; filter by any attribute,\n  network node or distance.\n* **Readings / consumption**: register readings normalised to numbers and ISO timestamps\n  (IST), with per-interval and per-day consumption derived from register deltas.\n* **Network**: the zone \u2192 circle \u2192 division \u2192 subdivision \u2192 substation \u2192 feeder \u2192\n  transformer hierarchy, reconstructed and repaired from per-meter data.\n* **Data quality**: every value we repaired or could not reconcile, with the portal's\n  original value.\n\nReference data is served from a local index synced from the portal's bulk export;\nreadings are fetched on demand and cached. `GET /v1/status` shows how fresh everything is.\nErrors use `application/problem+json` (RFC 9457) with a stable `code` (listed under the\n`Problem` schema). Unknown query parameters are rejected rather than ignored.\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Liveness probe",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Sync freshness and portal client health",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/v1/sync": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Re-sync reference data from the portal now",
+        "description": "Joins a sync that is already running, and returns the last result instead of\nsyncing again if one succeeded less than 30 s ago, so repeated calls can't spend the\nportal's rate budget.",
+        "operationId": "trigger_sync",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/v1/meters": {
+      "get": {
+        "tags": [
+          "meters"
+        ],
+        "summary": "List and filter meters",
+        "operationId": "list_meters",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Case-insensitive substring of meter id or serial number.",
+              "title": "Q"
+            },
+            "description": "Case-insensitive substring of meter id or serial number."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MeterStatus"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Repeatable, e.g. `status=faulty&status=installed`.",
+              "title": "Status"
+            },
+            "description": "Repeatable, e.g. `status=faulty&status=installed`."
+          },
+          {
+            "name": "make",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Repeatable, case-insensitive, e.g. `make=HPL`.",
+              "title": "Make"
+            },
+            "description": "Repeatable, case-insensitive, e.g. `make=HPL`."
+          },
+          {
+            "name": "phase",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Phase"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Single- or three-phase meters only.",
+              "title": "Phase"
+            },
+            "description": "Single- or three-phase meters only."
+          },
+          {
+            "name": "installation_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/InstallationType"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whole-current or CT-operated meters only.",
+              "title": "Installation Type"
+            },
+            "description": "Whole-current or CT-operated meters only."
+          },
+          {
+            "name": "zone",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Zone code, e.g. `Z-02`.",
+              "title": "Zone"
+            },
+            "description": "Zone code, e.g. `Z-02`."
+          },
+          {
+            "name": "circle",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Circle code.",
+              "title": "Circle"
+            },
+            "description": "Circle code."
+          },
+          {
+            "name": "division",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Division code.",
+              "title": "Division"
+            },
+            "description": "Division code."
+          },
+          {
+            "name": "subdivision",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Subdivision code.",
+              "title": "Subdivision"
+            },
+            "description": "Subdivision code."
+          },
+          {
+            "name": "substation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Substation code.",
+              "title": "Substation"
+            },
+            "description": "Substation code."
+          },
+          {
+            "name": "feeder",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Feeder code, e.g. `F-001` (the meters' `feeder_code`).",
+              "title": "Feeder"
+            },
+            "description": "Feeder code, e.g. `F-001` (the meters' `feeder_code`)."
+          },
+          {
+            "name": "transformer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Distribution transformer code, e.g. `DT-001` (the meters' `transformer_code`).",
+              "title": "Transformer"
+            },
+            "description": "Distribution transformer code, e.g. `DT-001` (the meters' `transformer_code`)."
+          },
+          {
+            "name": "has_issues",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only meters with (or without) data-quality issues.",
+              "title": "Has Issues"
+            },
+            "description": "Only meters with (or without) data-quality issues."
+          },
+          {
+            "name": "interval_minutes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reading interval: 30 (half-hourly) or 1440 (daily). Only meters whose readings are cached can match (`/v1/status` shows how many are).",
+              "title": "Interval Minutes"
+            },
+            "description": "Reading interval: 30 (half-hourly) or 1440 (daily). Only meters whose readings are cached can match (`/v1/status` shows how many are)."
+          },
+          {
+            "name": "near",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`lat,lng`: return meters within `radius_km`, nearest first, with `distance_km`.",
+              "examples": [
+                "26.9124,75.7873"
+              ],
+              "title": "Near"
+            },
+            "description": "`lat,lng`: return meters within `radius_km`, nearest first, with `distance_km`."
+          },
+          {
+            "name": "radius_km",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "maximum": 50,
+              "exclusiveMinimum": 0,
+              "description": "Search radius around `near`, in km.",
+              "default": 1.0,
+              "title": "Radius Km"
+            },
+            "description": "Search radius around `near`, in km."
+          },
+          {
+            "name": "bbox",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`min_lng,min_lat,max_lng,max_lat` (GeoJSON order). With `near=`, a meter must be in both.",
+              "examples": [
+                "75.78,26.90,75.82,26.94"
+              ],
+              "title": "Bbox"
+            },
+            "description": "`min_lng,min_lat,max_lng,max_lat` (GeoJSON order). With `near=`, a meter must be in both."
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^-?(meter_id|serial_number|make|status|phase|installation_type|transformer|feeder|issues|interval|distance|transformer_code|feeder_code|data_issue_count|reading_interval_minutes|distance_km)$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Sort key, prefixed with `-` for descending: `meter_id`, `serial_number`, `make`, `status`, `phase`, `installation_type`, `transformer`, `feeder`, `issues`, `interval`, `distance` (`distance` needs `near=`). The response's field names (`transformer_code`, `data_issue_count`, ...) work too. Defaults to `distance` with `near=`, else `meter_id`; ties are broken by `meter_id`.",
+              "examples": [
+                "-issues"
+              ],
+              "title": "Sort"
+            },
+            "description": "Sort key, prefixed with `-` for descending: `meter_id`, `serial_number`, `make`, `status`, `phase`, `installation_type`, `transformer`, `feeder`, `issues`, `interval`, `distance` (`distance` needs `near=`). The response's field names (`transformer_code`, `data_issue_count`, ...) work too. Defaults to `distance` with `near=`, else `meter_id`; ties are broken by `meter_id`."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "Page size.",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "Page size."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Items to skip.",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Items to skip."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MeterListItem_"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/meters/{meter_id}": {
+      "get": {
+        "tags": [
+          "meters"
+        ],
+        "summary": "Get one meter",
+        "operationId": "get_meter",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "meter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The meter's id as the portal shows it (any case accepted).",
+              "examples": [
+                "J100000"
+              ],
+              "title": "Meter Id"
+            },
+            "description": "The meter's id as the portal shows it (any case accepted)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Meter"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/meters/{meter_id}/readings": {
+      "get": {
+        "tags": [
+          "meters"
+        ],
+        "summary": "Register readings with per-interval consumption",
+        "description": "Normalised register readings (numbers, ISO timestamps, nulls instead of blanks),\neach with the consumption since the previous reading and quality flags.\n\nReadings are cached per meter (see `/v1/status`). If the portal can't be reached, a\ncached copy is served with `freshness.stale = true`: within about 3 s the first time,\nthen straight away for the next minute.",
+        "operationId": "get_readings",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "meter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The meter's id as the portal shows it (any case accepted).",
+              "examples": [
+                "J100000"
+              ],
+              "title": "Meter Id"
+            },
+            "description": "The meter's id as the portal shows it (any case accepted)."
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window start: `YYYY-MM-DD` or an ISO 8601 datetime between 2000 and 2100. Datetimes are converted to IST; naive ones are read as IST. Defaults to 7 days before `to`.",
+              "examples": [
+                "2026-06-01"
+              ],
+              "title": "From"
+            },
+            "description": "Window start: `YYYY-MM-DD` or an ISO 8601 datetime between 2000 and 2100. Datetimes are converted to IST; naive ones are read as IST. Defaults to 7 days before `to`."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window end, inclusive; a bare date covers the whole day. Defaults to the meter's latest reading, which may be long before today: compare `last_reading_at` with the current time.",
+              "examples": [
+                "2026-06-07"
+              ],
+              "title": "To"
+            },
+            "description": "Window end, inclusive; a bare date covers the whole day. Defaults to the meter's latest reading, which may be long before today: compare `last_reading_at` with the current time."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadingsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/meters/{meter_id}/consumption": {
+      "get": {
+        "tags": [
+          "meters"
+        ],
+        "summary": "Consumption per hour or day",
+        "description": "Energy used per calendar day or hour (IST), from register values at bucket\nboundaries. Every bucket the window touches is returned, as far as the cached data\nreaches (an end exactly on a boundary closes the bucket before it); buckets that\ncan't be fully computed are marked `complete: false`.",
+        "operationId": "get_consumption",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "meter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The meter's id as the portal shows it (any case accepted).",
+              "examples": [
+                "J100000"
+              ],
+              "title": "Meter Id"
+            },
+            "description": "The meter's id as the portal shows it (any case accepted)."
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window start: `YYYY-MM-DD` or an ISO 8601 datetime between 2000 and 2100. Datetimes are converted to IST; naive ones are read as IST. Defaults to 7 days before `to`.",
+              "examples": [
+                "2026-06-01"
+              ],
+              "title": "From"
+            },
+            "description": "Window start: `YYYY-MM-DD` or an ISO 8601 datetime between 2000 and 2100. Datetimes are converted to IST; naive ones are read as IST. Defaults to 7 days before `to`."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Window end, inclusive; a bare date covers the whole day. Defaults to the meter's latest reading, which may be long before today: compare `last_reading_at` with the current time.",
+              "examples": [
+                "2026-06-07"
+              ],
+              "title": "To"
+            },
+            "description": "Window end, inclusive; a bare date covers the whole day. Defaults to the meter's latest reading, which may be long before today: compare `last_reading_at` with the current time."
+          },
+          {
+            "name": "granularity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "day",
+                "hour"
+              ],
+              "type": "string",
+              "description": "Calendar buckets (IST). `hour` needs a half-hourly meter.",
+              "default": "day",
+              "title": "Granularity"
+            },
+            "description": "Calendar buckets (IST). `hour` needs a half-hourly meter."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsumptionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/meters/{meter_id}/anomalies": {
+      "get": {
+        "tags": [
+          "meters"
+        ],
+        "summary": "Anomalies detected in one meter's readings",
+        "description": "Every anomaly rule (listed under `/v1/insights/anomalies`) run over the meter's\nwhole cached series, most severe first.",
+        "operationId": "get_meter_anomalies",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "meter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The meter's id as the portal shows it (any case accepted).",
+              "examples": [
+                "J100000"
+              ],
+              "title": "Meter Id"
+            },
+            "description": "The meter's id as the portal shows it (any case accepted)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeterAnomalies"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transformers": {
+      "get": {
+        "tags": [
+          "transformers"
+        ],
+        "summary": "List distribution transformers",
+        "operationId": "list_transformers",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "feeder",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only transformers on this feeder, e.g. `F-001`.",
+              "title": "Feeder"
+            },
+            "description": "Only transformers on this feeder, e.g. `F-001`."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "Page size.",
+              "default": 100,
+              "title": "Limit"
+            },
+            "description": "Page size."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Items to skip.",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Items to skip."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Transformer_"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transformers/{code}": {
+      "get": {
+        "tags": [
+          "transformers"
+        ],
+        "summary": "Get one transformer with its meters",
+        "operationId": "get_transformer",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Transformer code (any case).",
+              "examples": [
+                "DT-001"
+              ],
+              "title": "Code"
+            },
+            "description": "Transformer code (any case)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransformerDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/network": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "Shape of the reconstructed network",
+        "operationId": "network_overview",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkOverview"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/v1/network/tree": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "Drill-down tree of the network",
+        "description": "Zone \u2192 \u2026 \u2192 transformer, built from the transformers' paths. A node means \"this\ncode under this path\", so a code reused under several parents appears once under\neach, and the counts at every level add up to the fleet total.",
+        "operationId": "network_tree",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 7,
+              "minimum": 1,
+              "description": "How many levels to return, from zone down.",
+              "default": 7,
+              "title": "Depth"
+            },
+            "description": "How many levels to return, from zone down."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NetworkTreeNode"
+                  },
+                  "title": "Response Network Tree"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/network/{level}": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "All nodes at one level",
+        "operationId": "network_level",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "level",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NetworkLevel",
+              "description": "A level of the network, top to bottom."
+            },
+            "description": "A level of the network, top to bottom."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NetworkNodeSummary"
+                  },
+                  "title": "Response Network Level"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/network/{level}/{code}": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "One network node",
+        "operationId": "network_node",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "level",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NetworkLevel",
+              "description": "A level of the network, top to bottom."
+            },
+            "description": "A level of the network, top to bottom."
+          },
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "The node's code at that level (any case).",
+              "examples": [
+                "DT-007"
+              ],
+              "title": "Code"
+            },
+            "description": "The node's code at that level (any case)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkNode"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/data-quality": {
+      "get": {
+        "tags": [
+          "network",
+          "data quality"
+        ],
+        "summary": "Everything we had to correct or could not reconcile",
+        "operationId": "data_quality",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataQualityReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/v1/insights/anomalies": {
+      "get": {
+        "tags": [
+          "insights"
+        ],
+        "summary": "Fleet-wide anomaly report",
+        "description": "Runs every anomaly rule over every cached series. Rules and severities:\ndata integrity (`duplicate_timestamps` info, `conflicting_duplicates`, `missing_values`,\n`gaps` warning), register behaviour (`register_decrease`, `implausible_load` error;\n`flatline`, `consumption_surge` warning; `power_factor_above_one` error), supply voltage\n(`no_voltage`, `voltage_outside_10pct` error; `voltage_outside_6pct` warning), status\n(`decommissioned_reporting` error) and freshness (`stale` warning: no reading for two\nintervals, at least two days).",
+        "operationId": "anomaly_report",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "rule",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "duplicate_timestamps",
+                    "conflicting_duplicates",
+                    "missing_values",
+                    "gaps",
+                    "register_decrease",
+                    "implausible_load",
+                    "flatline",
+                    "consumption_surge",
+                    "power_factor_above_one",
+                    "no_voltage",
+                    "voltage_outside_10pct",
+                    "voltage_outside_6pct",
+                    "decommissioned_reporting",
+                    "stale"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only list meters triggering this rule.",
+              "title": "Rule"
+            },
+            "description": "Only list meters triggering this rule."
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "info",
+                    "warning",
+                    "error"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Minimum severity to count and list.",
+              "title": "Severity"
+            },
+            "description": "Minimum severity to count and list."
+          },
+          {
+            "name": "include_meters",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Set to false for just the counts.",
+              "default": true,
+              "title": "Include Meters"
+            },
+            "description": "Set to false for just the counts."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnomalyReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/insights/consumption": {
+      "get": {
+        "tags": [
+          "insights"
+        ],
+        "summary": "Consumption grouped by any dimension",
+        "description": "Total energy per network node or meter attribute, over **complete IST days** only\n(a day needs a reading at both midnights). The window is widened to whole days. For\nexample: `group_by=transformer` to see transformer loading, `group_by=meter` for top\nconsumers, or `group_by=status` to see how much energy decommissioned meters use.",
+        "operationId": "consumption_insight",
+        "security": [
+          {},
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "zone",
+                "circle",
+                "division",
+                "subdivision",
+                "substation",
+                "feeder",
+                "transformer",
+                "status",
+                "make",
+                "phase",
+                "installation_type",
+                "meter"
+              ],
+              "type": "string",
+              "description": "A network level, a meter attribute, or `meter`.",
+              "default": "transformer",
+              "title": "Group By"
+            },
+            "description": "A network level, a meter attribute, or `meter`."
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "First day, `YYYY-MM-DD` (IST). Defaults to 7 days before `to`.",
+              "title": "From"
+            },
+            "description": "First day, `YYYY-MM-DD` (IST). Defaults to 7 days before `to`."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Last day, `YYYY-MM-DD`, inclusive (a datetime exactly at midnight closes the day before). Defaults to the latest cached reading.",
+              "title": "To"
+            },
+            "description": "Last day, `YYYY-MM-DD`, inclusive (a datetime exactly at midnight closes the day before). Defaults to the latest cached reading."
+          },
+          {
+            "name": "include_decommissioned",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Decommissioned meters still report consumption; include them?",
+              "default": true,
+              "title": "Include Decommissioned"
+            },
+            "description": "Decommissioned meters still report consumption; include them?"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "Return the top `limit` groups by consumption; see `groups_total`.",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "Return the top `limit` groups by consumption; see `groups_total`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsumptionInsight"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnomalyOut": {
+        "properties": {
+          "rule": {
+            "type": "string",
+            "enum": [
+              "duplicate_timestamps",
+              "conflicting_duplicates",
+              "missing_values",
+              "gaps",
+              "register_decrease",
+              "implausible_load",
+              "flatline",
+              "consumption_surge",
+              "power_factor_above_one",
+              "no_voltage",
+              "voltage_outside_10pct",
+              "voltage_outside_6pct",
+              "decommissioned_reporting",
+              "stale"
+            ],
+            "title": "Rule"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ],
+            "title": "Severity"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "occurrences": {
+            "type": "integer",
+            "title": "Occurrences"
+          },
+          "first_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First At"
+          },
+          "last_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rule",
+          "severity",
+          "message",
+          "occurrences",
+          "first_at",
+          "last_at"
+        ],
+        "title": "AnomalyOut"
+      },
+      "AnomalyReport": {
+        "properties": {
+          "meters_analysed": {
+            "type": "integer",
+            "title": "Meters Analysed",
+            "description": "Meters whose readings are in the local cache."
+          },
+          "meters_total": {
+            "type": "integer",
+            "title": "Meters Total"
+          },
+          "meters_by_rule": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "duplicate_timestamps",
+                "conflicting_duplicates",
+                "missing_values",
+                "gaps",
+                "register_decrease",
+                "implausible_load",
+                "flatline",
+                "consumption_surge",
+                "power_factor_above_one",
+                "no_voltage",
+                "voltage_outside_10pct",
+                "voltage_outside_6pct",
+                "decommissioned_reporting",
+                "stale"
+              ]
+            },
+            "type": "object",
+            "title": "Meters By Rule",
+            "description": "How many meters trigger each rule."
+          },
+          "rule_severity": {
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "info",
+                "warning",
+                "error"
+              ]
+            },
+            "propertyNames": {
+              "enum": [
+                "duplicate_timestamps",
+                "conflicting_duplicates",
+                "missing_values",
+                "gaps",
+                "register_decrease",
+                "implausible_load",
+                "flatline",
+                "consumption_surge",
+                "power_factor_above_one",
+                "no_voltage",
+                "voltage_outside_10pct",
+                "voltage_outside_6pct",
+                "decommissioned_reporting",
+                "stale"
+              ]
+            },
+            "type": "object",
+            "title": "Rule Severity",
+            "description": "Severity of each rule in `meters_by_rule`."
+          },
+          "meters_by_severity": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "info",
+                "warning",
+                "error"
+              ]
+            },
+            "type": "object",
+            "title": "Meters By Severity",
+            "description": "Distinct meters with at least one anomaly of each severity."
+          },
+          "meters": {
+            "items": {
+              "$ref": "#/components/schemas/MeterAnomalies"
+            },
+            "type": "array",
+            "title": "Meters",
+            "description": "Meters with anomalies. Meters whose only anomaly is `stale` are left out unless `rule=stale` is asked for; they still count in `meters_by_rule`."
+          }
+        },
+        "type": "object",
+        "required": [
+          "meters_analysed",
+          "meters_total",
+          "meters_by_rule",
+          "rule_severity",
+          "meters_by_severity",
+          "meters"
+        ],
+        "title": "AnomalyReport"
+      },
+      "ConsumptionBucket": {
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Start"
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time",
+            "title": "End"
+          },
+          "consumption_kwh": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumption Kwh",
+            "description": "Energy used in the bucket; null if it cannot be computed."
+          },
+          "apparent_kvah": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Apparent Kvah"
+          },
+          "power_factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Power Factor",
+            "description": "kWh / kVAh for the bucket. Null when the apparent energy is below 1 kVAh, where the registers' 0.01 resolution would distort the ratio (in practice: hourly buckets)."
+          },
+          "coverage": {
+            "type": "number",
+            "title": "Coverage",
+            "description": "Share of the bucket covered by consecutive readings (0-1)."
+          },
+          "complete": {
+            "type": "boolean",
+            "title": "Complete",
+            "description": "True if readings exist at both bucket boundaries with nothing odd between."
+          }
+        },
+        "type": "object",
+        "required": [
+          "start",
+          "end",
+          "consumption_kwh",
+          "apparent_kvah",
+          "power_factor",
+          "coverage",
+          "complete"
+        ],
+        "title": "ConsumptionBucket"
+      },
+      "ConsumptionGroup": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "examples": [
+              "DT-001"
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count",
+            "description": "Meters in the group."
+          },
+          "meters_with_data_count": {
+            "type": "integer",
+            "title": "Meters With Data Count",
+            "description": "Those with at least one complete day in the window."
+          },
+          "consumption_kwh": {
+            "type": "number",
+            "title": "Consumption Kwh"
+          },
+          "share": {
+            "type": "number",
+            "title": "Share",
+            "description": "Share of the total across all groups (0-1)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "meter_count",
+          "meters_with_data_count",
+          "consumption_kwh",
+          "share"
+        ],
+        "title": "ConsumptionGroup"
+      },
+      "ConsumptionInsight": {
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "enum": [
+              "zone",
+              "circle",
+              "division",
+              "subdivision",
+              "substation",
+              "feeder",
+              "transformer",
+              "status",
+              "make",
+              "phase",
+              "installation_type",
+              "meter"
+            ],
+            "title": "Group By"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start",
+            "description": "Midnight (IST) starting the first day of the window; null when there is no window because no readings are cached yet."
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End",
+            "description": "Midnight (IST) after the last day of the window (exclusive)."
+          },
+          "days_counted": {
+            "type": "integer",
+            "title": "Days Counted",
+            "description": "Distinct complete IST days that contributed to the totals."
+          },
+          "first_day": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Day",
+            "description": "First complete day counted."
+          },
+          "last_day": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Day",
+            "description": "Last complete day counted."
+          },
+          "include_decommissioned": {
+            "type": "boolean",
+            "title": "Include Decommissioned"
+          },
+          "meters_analysed": {
+            "type": "integer",
+            "title": "Meters Analysed",
+            "description": "Meters with cached readings that were included."
+          },
+          "meters_total": {
+            "type": "integer",
+            "title": "Meters Total"
+          },
+          "total_kwh": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Kwh",
+            "description": "Null when no meter with cached readings was included."
+          },
+          "groups_total": {
+            "type": "integer",
+            "title": "Groups Total",
+            "description": "Number of groups; `groups` holds the top `limit` by consumption."
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/ConsumptionGroup"
+            },
+            "type": "array",
+            "title": "Groups"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_by",
+          "start",
+          "end",
+          "days_counted",
+          "first_day",
+          "last_day",
+          "include_decommissioned",
+          "meters_analysed",
+          "meters_total",
+          "total_kwh",
+          "groups_total",
+          "groups",
+          "note"
+        ],
+        "title": "ConsumptionInsight"
+      },
+      "ConsumptionResponse": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id"
+          },
+          "granularity": {
+            "type": "string",
+            "enum": [
+              "day",
+              "hour"
+            ],
+            "title": "Granularity"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start",
+            "description": "Start of the first bucket. Buckets cover every hour/day the window touches, as far as the cached readings reach; null when the window holds no data."
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End",
+            "description": "End of the last bucket (exclusive)."
+          },
+          "last_reading_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reading At"
+          },
+          "total_kwh": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Kwh",
+            "description": "Register difference across the buckets' span, measured between the first and last readings inside it: exact even when readings are missing in between, but null if the register went down. May exceed the sum of `consumption_kwh` when an interval crosses a bucket boundary because of a gap."
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/ConsumptionBucket"
+            },
+            "type": "array",
+            "title": "Buckets"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/Freshness"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "granularity",
+          "start",
+          "end",
+          "last_reading_at",
+          "total_kwh",
+          "buckets",
+          "freshness"
+        ],
+        "title": "ConsumptionResponse"
+      },
+      "DataIssue": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "blank_code",
+              "blank_name",
+              "stale_name",
+              "path_conflict",
+              "unrecognised_value"
+            ],
+            "title": "Code",
+            "examples": [
+              "stale_name"
+            ]
+          },
+          "level": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetworkLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "reported": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported",
+            "description": "What the portal reported."
+          },
+          "resolved": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved",
+            "description": "What this API serves instead."
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "DataIssue",
+        "description": "Something in the portal's data that we corrected or could not reconcile."
+      },
+      "DataQualityReport": {
+        "properties": {
+          "meters_with_issues": {
+            "type": "integer",
+            "title": "Meters With Issues"
+          },
+          "issues_by_code": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "blank_code",
+                "blank_name",
+                "stale_name",
+                "path_conflict",
+                "unrecognised_value"
+              ]
+            },
+            "type": "object",
+            "title": "Issues By Code"
+          },
+          "meters": {
+            "items": {
+              "$ref": "#/components/schemas/MeterIssues"
+            },
+            "type": "array",
+            "title": "Meters"
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkOverview"
+          },
+          "readings": {
+            "$ref": "#/components/schemas/ReadingsQuality"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meters_with_issues",
+          "issues_by_code",
+          "meters",
+          "network",
+          "readings"
+        ],
+        "title": "DataQualityReport"
+      },
+      "FieldError": {
+        "properties": {
+          "location": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location",
+            "description": "Where the value came from, e.g. `[\"query\", \"from\"]`."
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "Machine-readable kind, e.g. `value_error` or `unknown_parameter`."
+          }
+        },
+        "type": "object",
+        "required": [
+          "location",
+          "message",
+          "type"
+        ],
+        "title": "FieldError"
+      },
+      "Freshness": {
+        "properties": {
+          "fetched_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fetched At",
+            "description": "When the data was fetched from the portal."
+          },
+          "stale": {
+            "type": "boolean",
+            "title": "Stale",
+            "description": "True when the data could not be refreshed just now (the portal failed, or this service's own request queue was full) and a cached copy older than the freshness TTL was served."
+          }
+        },
+        "type": "object",
+        "required": [
+          "fetched_at",
+          "stale"
+        ],
+        "title": "Freshness"
+      },
+      "Health": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "ok"
+          }
+        },
+        "type": "object",
+        "title": "Health"
+      },
+      "InstallationType": {
+        "type": "string",
+        "enum": [
+          "whole_current",
+          "ct_operated",
+          "unknown"
+        ],
+        "title": "InstallationType"
+      },
+      "Location": {
+        "properties": {
+          "latitude": {
+            "type": "number",
+            "title": "Latitude",
+            "examples": [
+              26.938961
+            ]
+          },
+          "longitude": {
+            "type": "number",
+            "title": "Longitude",
+            "examples": [
+              75.830957
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "latitude",
+          "longitude"
+        ],
+        "title": "Location",
+        "description": "WGS84 (assumed; the portal states no datum). Rounded to 6 decimal places (~0.1 m):\nthe portal sends 15, which is false precision."
+      },
+      "Meter": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id",
+            "examples": [
+              "J100000"
+            ]
+          },
+          "serial_number": {
+            "type": "string",
+            "title": "Serial Number",
+            "examples": [
+              "SE33962"
+            ]
+          },
+          "make": {
+            "type": "string",
+            "title": "Make",
+            "examples": [
+              "HPL"
+            ]
+          },
+          "phase": {
+            "$ref": "#/components/schemas/Phase"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MeterStatus"
+          },
+          "installation_type": {
+            "$ref": "#/components/schemas/InstallationType"
+          },
+          "transformer_code": {
+            "type": "string",
+            "title": "Transformer Code",
+            "examples": [
+              "DT-001"
+            ]
+          },
+          "feeder_code": {
+            "type": "string",
+            "title": "Feeder Code",
+            "examples": [
+              "F-001"
+            ]
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Location"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkPath"
+          },
+          "transformer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TransformerSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "data_issues": {
+            "items": {
+              "$ref": "#/components/schemas/DataIssue"
+            },
+            "type": "array",
+            "title": "Data Issues"
+          },
+          "readings_coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReadingsCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the readings cache holds for this meter; null until it has been fetched."
+          },
+          "synced_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Synced At",
+            "description": "When this record was last checked against the portal by a sync."
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "serial_number",
+          "make",
+          "phase",
+          "status",
+          "installation_type",
+          "transformer_code",
+          "feeder_code",
+          "network",
+          "synced_at"
+        ],
+        "title": "Meter"
+      },
+      "MeterAnomalies": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MeterStatus"
+          },
+          "transformer_code": {
+            "type": "string",
+            "title": "Transformer Code"
+          },
+          "anomalies": {
+            "items": {
+              "$ref": "#/components/schemas/AnomalyOut"
+            },
+            "type": "array",
+            "title": "Anomalies"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "status",
+          "transformer_code",
+          "anomalies"
+        ],
+        "title": "MeterAnomalies"
+      },
+      "MeterIssues": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/DataIssue"
+            },
+            "type": "array",
+            "title": "Issues"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "issues"
+        ],
+        "title": "MeterIssues"
+      },
+      "MeterListItem": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id",
+            "examples": [
+              "J100000"
+            ]
+          },
+          "serial_number": {
+            "type": "string",
+            "title": "Serial Number",
+            "examples": [
+              "SE33962"
+            ]
+          },
+          "make": {
+            "type": "string",
+            "title": "Make",
+            "examples": [
+              "HPL"
+            ]
+          },
+          "phase": {
+            "$ref": "#/components/schemas/Phase"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MeterStatus"
+          },
+          "installation_type": {
+            "$ref": "#/components/schemas/InstallationType"
+          },
+          "transformer_code": {
+            "type": "string",
+            "title": "Transformer Code",
+            "examples": [
+              "DT-001"
+            ]
+          },
+          "feeder_code": {
+            "type": "string",
+            "title": "Feeder Code",
+            "examples": [
+              "F-001"
+            ]
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Location"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "data_issue_count": {
+            "type": "integer",
+            "title": "Data Issue Count",
+            "description": "How many corrections this API applied to the meter's portal data."
+          },
+          "reading_interval_minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reading Interval Minutes",
+            "description": "30 for half-hourly meters, 1440 for daily ones; null until the meter's readings are cached."
+          },
+          "distance_km": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distance Km",
+            "description": "Distance from the search point; set only on proximity searches (`near=`)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "serial_number",
+          "make",
+          "phase",
+          "status",
+          "installation_type",
+          "transformer_code",
+          "feeder_code",
+          "data_issue_count"
+        ],
+        "title": "MeterListItem"
+      },
+      "MeterStatus": {
+        "type": "string",
+        "enum": [
+          "installed",
+          "faulty",
+          "decommissioned",
+          "unknown"
+        ],
+        "title": "MeterStatus"
+      },
+      "MeterSummary": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id",
+            "examples": [
+              "J100000"
+            ]
+          },
+          "serial_number": {
+            "type": "string",
+            "title": "Serial Number",
+            "examples": [
+              "SE33962"
+            ]
+          },
+          "make": {
+            "type": "string",
+            "title": "Make",
+            "examples": [
+              "HPL"
+            ]
+          },
+          "phase": {
+            "$ref": "#/components/schemas/Phase"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MeterStatus"
+          },
+          "installation_type": {
+            "$ref": "#/components/schemas/InstallationType"
+          },
+          "transformer_code": {
+            "type": "string",
+            "title": "Transformer Code",
+            "examples": [
+              "DT-001"
+            ]
+          },
+          "feeder_code": {
+            "type": "string",
+            "title": "Feeder Code",
+            "examples": [
+              "F-001"
+            ]
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Location"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "serial_number",
+          "make",
+          "phase",
+          "status",
+          "installation_type",
+          "transformer_code",
+          "feeder_code"
+        ],
+        "title": "MeterSummary"
+      },
+      "NetworkEdge": {
+        "properties": {
+          "child_level": {
+            "$ref": "#/components/schemas/NetworkLevel"
+          },
+          "parent_level": {
+            "$ref": "#/components/schemas/NetworkLevel"
+          },
+          "distinct_pairs": {
+            "type": "integer",
+            "title": "Distinct Pairs"
+          },
+          "children_with_multiple_parents": {
+            "type": "integer",
+            "title": "Children With Multiple Parents"
+          },
+          "functional": {
+            "type": "boolean",
+            "title": "Functional",
+            "description": "True if every child has exactly one parent at this step."
+          }
+        },
+        "type": "object",
+        "required": [
+          "child_level",
+          "parent_level",
+          "distinct_pairs",
+          "children_with_multiple_parents",
+          "functional"
+        ],
+        "title": "NetworkEdge"
+      },
+      "NetworkLevel": {
+        "type": "string",
+        "enum": [
+          "zone",
+          "circle",
+          "division",
+          "subdivision",
+          "substation",
+          "feeder",
+          "transformer"
+        ],
+        "title": "NetworkLevel",
+        "description": "Levels of the distribution network, top to bottom."
+      },
+      "NetworkNeighbour": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "transformer_count": {
+            "type": "integer",
+            "title": "Transformer Count",
+            "description": "Transformers through which the two nodes are connected."
+          },
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "name",
+          "transformer_count",
+          "meter_count"
+        ],
+        "title": "NetworkNeighbour"
+      },
+      "NetworkNode": {
+        "properties": {
+          "level": {
+            "$ref": "#/components/schemas/NetworkLevel"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count"
+          },
+          "transformer_count": {
+            "type": "integer",
+            "title": "Transformer Count"
+          },
+          "parent_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Parent Codes",
+            "description": "Every parent this code was observed under: one for circles and transformers, usually several for the levels in between (see /v1/network)."
+          },
+          "meters_by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/MeterStatus"
+            },
+            "type": "object",
+            "title": "Meters By Status"
+          },
+          "parents": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkNeighbour"
+            },
+            "type": "array",
+            "title": "Parents"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkNeighbour"
+            },
+            "type": "array",
+            "title": "Children"
+          },
+          "transformers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Transformers",
+            "description": "Codes of the distribution transformers under this node. A transformer node lists itself; its details are at /v1/transformers/{code}."
+          },
+          "name_variants": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Name Variants",
+            "description": "Other names the portal uses for this node (stale data)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "level",
+          "code",
+          "name",
+          "meter_count",
+          "transformer_count",
+          "parent_codes",
+          "meters_by_status",
+          "parents",
+          "children",
+          "transformers"
+        ],
+        "title": "NetworkNode"
+      },
+      "NetworkNodeRef": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "examples": [
+              "DT-001"
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name",
+            "examples": [
+              "Malviya Nagar DT 1"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "title": "NetworkNodeRef"
+      },
+      "NetworkNodeSummary": {
+        "properties": {
+          "level": {
+            "$ref": "#/components/schemas/NetworkLevel"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count"
+          },
+          "transformer_count": {
+            "type": "integer",
+            "title": "Transformer Count"
+          },
+          "parent_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Parent Codes",
+            "description": "Every parent this code was observed under: one for circles and transformers, usually several for the levels in between (see /v1/network)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "level",
+          "code",
+          "name",
+          "meter_count",
+          "transformer_count",
+          "parent_codes"
+        ],
+        "title": "NetworkNodeSummary"
+      },
+      "NetworkOverview": {
+        "properties": {
+          "is_tree": {
+            "type": "boolean",
+            "title": "Is Tree",
+            "description": "False if any level has children appearing under several parents."
+          },
+          "node_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/NetworkLevel"
+            },
+            "type": "object",
+            "title": "Node Counts"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkEdge"
+            },
+            "type": "array",
+            "title": "Edges"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "is_tree",
+          "node_counts",
+          "edges",
+          "note"
+        ],
+        "title": "NetworkOverview"
+      },
+      "NetworkPath": {
+        "properties": {
+          "zone": {
+            "$ref": "#/components/schemas/NetworkNodeRef"
+          },
+          "circle": {
+            "$ref": "#/components/schemas/NetworkNodeRef"
+          },
+          "division": {
+            "$ref": "#/components/schemas/NetworkNodeRef"
+          },
+          "subdivision": {
+            "$ref": "#/components/schemas/NetworkNodeRef"
+          },
+          "substation": {
+            "$ref": "#/components/schemas/NetworkNodeRef"
+          },
+          "feeder": {
+            "$ref": "#/components/schemas/NetworkNodeRef"
+          },
+          "transformer": {
+            "$ref": "#/components/schemas/NetworkNodeRef"
+          }
+        },
+        "type": "object",
+        "required": [
+          "zone",
+          "circle",
+          "division",
+          "subdivision",
+          "substation",
+          "feeder",
+          "transformer"
+        ],
+        "title": "NetworkPath",
+        "description": "Where a meter sits in the network, from zone down to its distribution transformer."
+      },
+      "NetworkTreeNode": {
+        "properties": {
+          "level": {
+            "$ref": "#/components/schemas/NetworkLevel"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count"
+          },
+          "transformer_count": {
+            "type": "integer",
+            "title": "Transformer Count"
+          },
+          "meters_by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/MeterStatus"
+            },
+            "type": "object",
+            "title": "Meters By Status"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkTreeNode"
+            },
+            "type": "array",
+            "title": "Children"
+          }
+        },
+        "type": "object",
+        "required": [
+          "level",
+          "code",
+          "name",
+          "meter_count",
+          "transformer_count",
+          "meters_by_status"
+        ],
+        "title": "NetworkTreeNode"
+      },
+      "Page_MeterListItem_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MeterListItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Number of items matching the query (ignoring limit/offset)."
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "Page[MeterListItem]"
+      },
+      "Page_Transformer_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Transformer"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Number of items matching the query (ignoring limit/offset)."
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "Page[Transformer]"
+      },
+      "Phase": {
+        "type": "string",
+        "enum": [
+          "single",
+          "three",
+          "unknown"
+        ],
+        "title": "Phase"
+      },
+      "PortalClientStatus": {
+        "properties": {
+          "base_url": {
+            "type": "string",
+            "title": "Base Url"
+          },
+          "logins": {
+            "type": "integer",
+            "title": "Logins"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "retries": {
+            "type": "integer",
+            "title": "Retries"
+          },
+          "rate_limited": {
+            "type": "integer",
+            "title": "Rate Limited",
+            "description": "429 responses received from the portal."
+          },
+          "upstream_errors": {
+            "type": "integer",
+            "title": "Upstream Errors",
+            "description": "Network errors and 5xx responses (before retries)."
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "session_expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Expires At"
+          },
+          "clock_skew_s": {
+            "type": "number",
+            "title": "Clock Skew S",
+            "description": "Portal clock minus ours, from its Date header (used for signing)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "base_url",
+          "logins",
+          "requests",
+          "retries",
+          "rate_limited",
+          "upstream_errors",
+          "last_error",
+          "last_success_at",
+          "session_expires_at",
+          "clock_skew_s"
+        ],
+        "title": "PortalClientStatus"
+      },
+      "Problem": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "default": "about:blank"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Stable machine-readable error code:\n\n* `unauthorized` (401): `X-API-Key` is missing or wrong (only when the server sets `URJA_API_KEY`).\n* `meter_not_found` (404): No meter with that id in the index, or the portal no longer has it.\n* `transformer_not_found` (404): No distribution transformer with that code.\n* `network_node_not_found` (404): No network node with that level and code.\n* `not_found` (404): No such path.\n* `method_not_allowed` (405): The path exists, but not for this HTTP method.\n* `http_error` (4xx): Any other HTTP-level error.\n* `validation_error` (422): A parameter is malformed, out of range or not recognised; `errors` says which.\n* `granularity_unavailable` (422): Hourly consumption asked of a meter that reports once a day.\n* `internal_error` (500): A bug in this service; the server log has the details.\n* `upstream_auth_failed` (502): This service could not log in to the portal.\n* `upstream_protocol_error` (502): The portal answered in a format this service does not understand.\n* `sync_rejected` (502): A sync returned data that looked broken; the previous snapshot is kept.\n* `index_not_ready` (503): The first sync with the portal hasn't finished; `Retry-After` gives the next attempt.\n* `upstream_unavailable` (503): The portal is down or too slow, and there is no cached copy to serve.\n* `upstream_rate_limited` (503): The portal kept answering 429, and there is no cached copy to serve.\n* `busy` (503): Too many requests are queued for the portal's rate budget.",
+            "examples": [
+              "meter_not_found"
+            ]
+          },
+          "errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/FieldError"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errors",
+            "description": "Field-level validation errors."
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "status",
+          "code"
+        ],
+        "title": "Problem",
+        "description": "RFC 9457 problem details."
+      },
+      "Reading": {
+        "properties": {
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Timestamp",
+            "description": "Reading time, ISO 8601 with the IST offset (+05:30)."
+          },
+          "register_kwh": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Register Kwh",
+            "description": "Active-energy register (kWh): a running total, not consumption. 0.01 kWh resolution."
+          },
+          "register_kvah": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Register Kvah",
+            "description": "Apparent-energy register (kVAh): a running total."
+          },
+          "voltage_v": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Voltage V",
+            "description": "R-phase voltage at the moment of reading (V), a spot value."
+          },
+          "consumption_kwh": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumption Kwh",
+            "description": "Active energy used since the previous reading in this response: the register's rise above its highest value so far (over the meter's whole series, not just this window), so a read a rounding step low adds nothing. Null for the first reading, when either register value is missing, or when the register went down (flagged `register_decrease`). After a gap it covers the whole gap (flagged `gap_before`)."
+          },
+          "flags": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "missing_kwh",
+                "missing_kvah",
+                "missing_voltage",
+                "register_decrease",
+                "gap_before",
+                "duplicate",
+                "conflicting_duplicate"
+              ]
+            },
+            "type": "array",
+            "title": "Flags",
+            "description": "Quality flags for this reading."
+          }
+        },
+        "type": "object",
+        "required": [
+          "timestamp",
+          "register_kwh",
+          "register_kvah",
+          "voltage_v",
+          "consumption_kwh"
+        ],
+        "title": "Reading"
+      },
+      "ReadingsCacheStatus": {
+        "properties": {
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count",
+            "description": "Meters whose readings are cached."
+          },
+          "meters_total": {
+            "type": "integer",
+            "title": "Meters Total",
+            "description": "Meters in the index (what a complete cache would hold)."
+          },
+          "oldest_fetch": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Fetch"
+          },
+          "newest_fetch": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newest Fetch"
+          },
+          "first_reading_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Reading At"
+          },
+          "last_reading_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reading At",
+            "description": "Latest reading held for any meter."
+          },
+          "ttl_s": {
+            "type": "integer",
+            "title": "Ttl S"
+          },
+          "warmup": {
+            "$ref": "#/components/schemas/WarmupStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_count",
+          "meters_total",
+          "oldest_fetch",
+          "newest_fetch",
+          "first_reading_at",
+          "last_reading_at",
+          "ttl_s",
+          "warmup"
+        ],
+        "title": "ReadingsCacheStatus"
+      },
+      "ReadingsCoverage": {
+        "properties": {
+          "interval_minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval Minutes",
+            "description": "Detected reading interval, e.g. 30 (half-hourly) or 1440 (daily)."
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "first_reading_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Reading At"
+          },
+          "last_reading_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reading At"
+          },
+          "fetched_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Fetched At",
+            "description": "When the series was last fetched from the portal."
+          }
+        },
+        "type": "object",
+        "required": [
+          "interval_minutes",
+          "count",
+          "first_reading_at",
+          "last_reading_at",
+          "fetched_at"
+        ],
+        "title": "ReadingsCoverage",
+        "description": "What the local cache currently holds for a meter's readings."
+      },
+      "ReadingsQuality": {
+        "properties": {
+          "meters_cached": {
+            "type": "integer",
+            "title": "Meters Cached",
+            "description": "Meters whose readings are cached; the counts below cover only these."
+          },
+          "duplicate_timestamps": {
+            "type": "integer",
+            "title": "Duplicate Timestamps"
+          },
+          "conflicting_duplicates": {
+            "type": "integer",
+            "title": "Conflicting Duplicates"
+          },
+          "missing_values": {
+            "type": "integer",
+            "title": "Missing Values",
+            "description": "Meters with a blank kWh register or voltage in some reading."
+          },
+          "gaps": {
+            "type": "integer",
+            "title": "Gaps"
+          },
+          "register_decrease": {
+            "type": "integer",
+            "title": "Register Decrease"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meters_cached",
+          "duplicate_timestamps",
+          "conflicting_duplicates",
+          "missing_values",
+          "gaps",
+          "register_decrease"
+        ],
+        "title": "ReadingsQuality",
+        "description": "How many meters trigger each data-integrity anomaly rule (see `/v1/insights/anomalies`),\nover the readings in the local cache."
+      },
+      "ReadingsResponse": {
+        "properties": {
+          "meter_id": {
+            "type": "string",
+            "title": "Meter Id"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start",
+            "description": "Start of the window served (inclusive)."
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End",
+            "description": "End of the window served (inclusive)."
+          },
+          "last_reading_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Reading At",
+            "description": "The meter's latest reading overall. Defaults are relative to this, not to the current time, so compare it with today before assuming 'recent' means this week."
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ReadingsSummary"
+          },
+          "readings": {
+            "items": {
+              "$ref": "#/components/schemas/Reading"
+            },
+            "type": "array",
+            "title": "Readings"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/Freshness"
+          }
+        },
+        "type": "object",
+        "required": [
+          "meter_id",
+          "start",
+          "end",
+          "last_reading_at",
+          "summary",
+          "readings",
+          "freshness"
+        ],
+        "title": "ReadingsResponse"
+      },
+      "ReadingsSummary": {
+        "properties": {
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          },
+          "interval_minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval Minutes",
+            "description": "Detected reading interval in minutes."
+          },
+          "consumption_kwh": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumption Kwh",
+            "description": "Register difference between the first and last reading in this response, i.e. the energy used between those two instants (blank values in between lose nothing). Null if the register went down between two readings in this response (see `flags.register_decrease`; a decrease flagged on the first reading that carries a value is a fall from before the window and does not count). For calendar totals that include the reading closing the last day, use `/consumption`."
+          },
+          "average_power_factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Power Factor",
+            "description": "\u0394kWh / \u0394kVAh over the same span. Null when the apparent energy is below 1 kVAh, where the registers' 0.01 resolution would distort the ratio by 1 % or more."
+          },
+          "min_voltage_v": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Voltage V"
+          },
+          "max_voltage_v": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Voltage V"
+          },
+          "missing_intervals": {
+            "type": "integer",
+            "title": "Missing Intervals",
+            "description": "Readings missing between consecutive readings in this response, given the interval. Readings missing before the first or after the last one returned are not counted; the `gaps` rule of `/anomalies` covers the whole series."
+          },
+          "flags": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "missing_kwh",
+                "missing_kvah",
+                "missing_voltage",
+                "register_decrease",
+                "gap_before",
+                "duplicate",
+                "conflicting_duplicate"
+              ]
+            },
+            "type": "object",
+            "title": "Flags",
+            "description": "Count of readings per quality flag."
+          }
+        },
+        "type": "object",
+        "required": [
+          "count",
+          "interval_minutes",
+          "consumption_kwh",
+          "average_power_factor",
+          "min_voltage_v",
+          "max_voltage_v",
+          "missing_intervals"
+        ],
+        "title": "ReadingsSummary"
+      },
+      "ReferenceDataStatus": {
+        "properties": {
+          "last_success_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "age_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age S",
+            "description": "Seconds since the last successful sync."
+          },
+          "stale": {
+            "type": "boolean",
+            "title": "Stale",
+            "description": "True if no sync has succeeded yet, or the last successful one is older than two sync intervals."
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "export",
+                  "crawl"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "interval_s": {
+            "type": "integer",
+            "title": "Interval S"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncRun"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The most recent sync attempt, successful or not."
+          }
+        },
+        "type": "object",
+        "required": [
+          "last_success_at",
+          "age_s",
+          "stale",
+          "source",
+          "interval_s",
+          "last_run"
+        ],
+        "title": "ReferenceDataStatus"
+      },
+      "Status": {
+        "properties": {
+          "index_ready": {
+            "type": "boolean",
+            "title": "Index Ready",
+            "description": "True once reference data has been synced at least once."
+          },
+          "reference_data": {
+            "$ref": "#/components/schemas/ReferenceDataStatus"
+          },
+          "readings_cache": {
+            "$ref": "#/components/schemas/ReadingsCacheStatus"
+          },
+          "portal": {
+            "$ref": "#/components/schemas/PortalClientStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "index_ready",
+          "reference_data",
+          "readings_cache",
+          "portal"
+        ],
+        "title": "Status"
+      },
+      "SyncResult": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "export",
+              "crawl"
+            ],
+            "title": "Source"
+          },
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count"
+          },
+          "transformer_count": {
+            "type": "integer",
+            "title": "Transformer Count",
+            "description": "Transformers served: those with at least one meter."
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "meter_count",
+          "transformer_count",
+          "warnings"
+        ],
+        "title": "SyncResult"
+      },
+      "SyncRun": {
+        "properties": {
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "ok",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "export",
+                  "crawl"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source",
+            "description": "`export` (signed bulk export) or `crawl` (detail-page fallback)."
+          },
+          "meter_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meter Count"
+          },
+          "transformer_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transformer Count"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "started_at",
+          "finished_at",
+          "status",
+          "source",
+          "meter_count",
+          "transformer_count",
+          "warnings",
+          "error"
+        ],
+        "title": "SyncRun"
+      },
+      "Transformer": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "examples": [
+              "DT-001"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "examples": [
+              "Malviya Nagar DT 1"
+            ]
+          },
+          "feeder_code": {
+            "type": "string",
+            "title": "Feeder Code",
+            "examples": [
+              "F-001"
+            ]
+          },
+          "capacity_kva": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity Kva",
+            "examples": [
+              100
+            ]
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkPath",
+            "description": "The transformer's own position in the network (zone \u2192 feeder)."
+          },
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count"
+          },
+          "meters_by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/MeterStatus"
+            },
+            "type": "object",
+            "title": "Meters By Status"
+          },
+          "name_variants": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Name Variants",
+            "description": "Other names meters report for this transformer (stale data)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "name",
+          "feeder_code",
+          "network",
+          "meter_count",
+          "meters_by_status"
+        ],
+        "title": "Transformer"
+      },
+      "TransformerDetail": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "examples": [
+              "DT-001"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "examples": [
+              "Malviya Nagar DT 1"
+            ]
+          },
+          "feeder_code": {
+            "type": "string",
+            "title": "Feeder Code",
+            "examples": [
+              "F-001"
+            ]
+          },
+          "capacity_kva": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity Kva",
+            "examples": [
+              100
+            ]
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkPath",
+            "description": "The transformer's own position in the network (zone \u2192 feeder)."
+          },
+          "meter_count": {
+            "type": "integer",
+            "title": "Meter Count"
+          },
+          "meters_by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/MeterStatus"
+            },
+            "type": "object",
+            "title": "Meters By Status"
+          },
+          "name_variants": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Name Variants",
+            "description": "Other names meters report for this transformer (stale data)."
+          },
+          "meters": {
+            "items": {
+              "$ref": "#/components/schemas/MeterSummary"
+            },
+            "type": "array",
+            "title": "Meters",
+            "description": "Meters connected to this transformer."
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "name",
+          "feeder_code",
+          "network",
+          "meter_count",
+          "meters_by_status",
+          "meters"
+        ],
+        "title": "TransformerDetail"
+      },
+      "TransformerSummary": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "examples": [
+              "DT-001"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "examples": [
+              "Malviya Nagar DT 1"
+            ]
+          },
+          "feeder_code": {
+            "type": "string",
+            "title": "Feeder Code",
+            "examples": [
+              "F-001"
+            ]
+          },
+          "capacity_kva": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity Kva",
+            "examples": [
+              100
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "name",
+          "feeder_code"
+        ],
+        "title": "TransformerSummary"
+      },
+      "WarmupStatus": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "aborted"
+            ],
+            "title": "State",
+            "description": "`aborted`: the pass stopped because the portal refused our login."
+          },
+          "done": {
+            "type": "integer",
+            "title": "Done"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed",
+            "description": "Meters whose refresh failed (a cached copy, if any, was kept)."
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "errors": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Errors",
+            "description": "Failed fetches by error type."
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "done",
+          "total",
+          "failed"
+        ],
+        "title": "WarmupStatus"
+      }
+    },
+    "securitySchemes": {
+      "APIKeyHeader": {
+        "type": "apiKey",
+        "description": "Required only if the server is configured with URJA_API_KEY.",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "meters",
+      "description": "Meter records, readings and consumption."
+    },
+    {
+      "name": "transformers",
+      "description": "Distribution transformers (DTs) and the meters on them."
+    },
+    {
+      "name": "network",
+      "description": "The reconstructed distribution network."
+    },
+    {
+      "name": "data quality",
+      "description": "Corrections applied to the portal's data."
+    },
+    {
+      "name": "insights",
+      "description": "Fleet-wide analysis over the local cache: anomalies, consumption roll-ups."
+    },
+    {
+      "name": "system",
+      "description": "Health, freshness and sync control."
+    }
+  ]
+}
